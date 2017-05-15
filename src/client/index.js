@@ -5,7 +5,3 @@ ReactDOM.render(
   <h1>Hello, world!</h1>,
   document.getElementById('root')
 )
-
-window.fetch('/foo').then(r => r.json()).then(data => {
-  console.log(data)
-})

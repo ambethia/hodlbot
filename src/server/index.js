@@ -1,6 +1,10 @@
+import Bot from '../bot'
+
+const bot = new Bot()
+
 const server = (app) => {
-  app.get('/foo', (req, res) => {
-    res.json({ hello: 'world' })
+  app.get('/orders', (req, res) => {
+    res.json(bot.orderBook)
   })
 }
 
