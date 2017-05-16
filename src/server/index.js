@@ -1,11 +1,14 @@
 import Bot from '../bot'
 
-const bot = new Bot()
-
 const server = (app) => {
-  app.get('/orders', (req, res) => {
-    res.json(bot.orderBook)
+  app.get('/deposits', (req, res) => {
+    res.json([])
   })
 }
+
+const bot = new Bot()
+setInterval(() => {
+  bot.run()
+}, 60 * 60 * 100)
 
 export default server

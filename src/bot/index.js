@@ -1,268 +1,129 @@
-import GDAX from 'gdax'
-import _ from 'lodash'
-import num from 'num'
+const GDAX = require('gdax')
+const moment = require('moment')
+const Coinbase = require('coinbase').Client
+const num = require('num')
 
 const { API_KEY, SECRET, PASSPHRASE } = process.env
+const { CB_API_KEY, CB_SECRET } = process.env
+
+const DEPOSIT_AMOUNT = 10    // Dollars
+const DEPOSIT_FREQUENCY = 2  // Days
+const SPEND_RATE = 0.5       // How much of available balance to spend each buy
 
 const PRODUCT = 'BTC-USD'
-const INTERVAL = 42
-const POS_SIZE = 0.042
-const MOVEMENT = 0.0042
-const DISTANCE = 0.00042
-
-const TRADE = true
 
 class Bot {
-  trades = []
-  orders = {}
-  candles = []
-  fairValue
-  spread
-  interval
-  previous
-  current
-  running = 0
-  outlook = 'none'
-  bid = { price: num(0), size: num(0) }
-  ask = { price: num(0), size: num(0) }
-  accounts = []
-  pendingBid = false
-  pendingAsk = false
-
-  constructor () {
-    this.publicClient = new GDAX.PublicClient(PRODUCT)
-    this.authedClient = new GDAX.AuthenticatedClient(API_KEY, SECRET, PASSPHRASE)
+  run () {
     this.connect()
-    setInterval(() => this.tick(), 0)
-    setInterval(() => this.tock(), 1000)
-  }
 
-  tick () {
-    this.updatePositions()
-    this.updateOrders()
-  }
-
-  tock () {
-    this.getTrades()
-    this.syncOrders()
-    this.updateAccounts()
-    // console.log({
-    //   bid: {
-    //     price: this.bid.price.toString(),
-    //     size: this.bid.size.toString()
-    //   },
-    //   ask: {
-    //     price: this.ask.price.toString(),
-    //     size: this.ask.size.toString()
-    //   }
-    // })
-  }
-
-  updateAccounts () {
-    this.authedClient.getAccounts((err, resp, data) => {
-      if (err) {
-        console.error(err)
+    // Deposit money every so-many days ($10 is the minimum).
+    // Then if there's any balance availble, transfer it to GDAX.
+    this.deposit(DEPOSIT_AMOUNT, DEPOSIT_FREQUENCY).then(({ id, balance }) => {
+      const { amount, currency } = balance
+      if (parseFloat(amount) > 0) {
+        this.authedClient.deposit({ coinbase_account_id: id, amount, currency }, (_, resp, data) => {
+          console.log(`Transfered $${amount} to GDAX.`)
+        })
       } else {
-        this.accounts = data
+        console.log(`No funds avilable to transfer to GDAX.`)
       }
     })
-  }
 
-  updateOrders () {
-    if (this.fairValue) {
-      const bidOrders = this.ordersOn('buy')
-      const askOrders = this.ordersOn('sell')
-      const staleBids = this.stale(bidOrders)
-      const staleAsks = this.stale(askOrders)
-      if (staleBids.length > 0 || bidOrders.length === 0) {
-        staleBids.forEach(({ id }) => this.authedClient.cancelOrder(id, (err, resp, data) => {
-          if (err) console.log('Cancel Bid:', err.message)
-          delete this.orders[id]
-        }))
-        if (!this.pendingBid && bidOrders.length <= 1 && TRADE) {
-          this.pendingBid = true
-          this.authedClient.buy({
-            'price': this.bid.price.toString(),
-            'size': this.bid.size.toString(),
-            'product_id': PRODUCT
-          }, (err, resp, data) => {
-            if (err) {
-              console.error(err)
-            } else {
-              this.orders[data.id] = data
-              this.pendingBid = false
+    // Get last 200 hourly candles and determine if we should buy.
+    const start = moment().subtract(200, 'hours').toISOString()
+    const end = moment().toISOString()
+    this.publicClient.getProductHistoricRates({ granularity: 60 * 60, start, end }, (_, resp, candles) => {
+      const strat = new Strategy(candles)
+      if (strat.shouldBuy()) {
+        this.authedClient.cancelAllOrders(() => {
+          this.authedClient.getAccounts((_, resp, accounts) => {
+            const account = accounts.find(({ currency }) => currency === 'USD')
+            const availble = num(account.available).mul(SPEND_RATE)
+            availble.set_precision(2)
+            if (availble > 0) {
+              this.publicClient.getProductOrderBook({'level': 1}, (_, resp, best) => {
+                const bestBid = num(best.bids[0][0])
+                this.authedClient.buy({
+                  'price': bestBid,
+                  'size': availble.div(bestBid),
+                  'product_id': PRODUCT
+                }, () => console.log(`Placed buy for ${availble.div(bestBid)} BTC @ $${bestBid}.`))
+              })
             }
           })
-        }
-      }
-      if (staleAsks.length > 0 || askOrders.length === 0) {
-        staleAsks.forEach(({ id }) => this.authedClient.cancelOrder(id, (err, resp, data) => {
-          if (err) console.log('Cancel Ask:', err.message)
-          delete this.orders[id]
-        }))
-        if (!this.pendingAsk && askOrders.length <= 1 && TRADE) {
-          this.pendingAsk = true
-          this.authedClient.sell({
-            'price': this.ask.price.toString(),
-            'size': this.ask.size.toString(),
-            'product_id': PRODUCT
-          }, (err, resp, data) => {
-            if (err) {
-              console.error(err)
-            } else {
-              this.orders[data.id] = data
-              this.pendingAsk = false
-            }
-          })
-        }
-      }
-    }
-  }
-
-  ordersOn (side) {
-    return Object.values(this.orders).filter((o) =>
-      o.product_id === PRODUCT && (o.status === 'open' || o.status === 'pending') && o.side === side
-    )
-  }
-
-  stale (orders) {
-    return Object.values(orders).filter((o) => {
-      let diff
-      if (o.side === 'buy') {
-        diff = num(o.price).sub(this.bid.price).abs()
-      } else {
-        diff = this.ask.price.sub(o.price).abs()
-      }
-      return diff.gt(0.10)
-    })
-  }
-
-  syncOrders () {
-    this.authedClient.getOrders((err, resp, data) => {
-      if (err) {
-        console.error('GET ORDERS:', err.message)
-      } else {
-        data.forEach((order) => {
-          this.orders[order.id] = order
         })
       }
     })
   }
 
-  updatePositions () {
-    if (this.isMarketReady) {
-      let bb // best bid
-      let bi = 0
-      let bt = num(0)
-      while (bt.lt(1)) {
-        bb = this.orderBook.bids[bi]
-        bt = bt.add(bb.size)
-        bi++
-      }
-      let ba // best ask
-      let ai = 0
-      let at = num(0)
-      while (at.lt(1)) {
-        ba = this.orderBook.bids[ai]
-        at = at.add(ba.size)
-        ai++
-      }
-      this.fairValue = ba.price.mul(ba.size).add(bb.price.mul(bb.size)).div(ba.size.add(bb.size))
-      this.spread = ba.price.sub(bb.price)
-      // const width = this.fairValue.mul(DISTANCE)
-      // if (this.spread.lt(width)) {
-      //   this.bid.price = this.fairValue.sub(width.div(2))
-      //   this.ask.price = this.fairValue.add(width.div(2))
-      // } else {
-      this.bid.price = bb.price.add(0.01)
-      this.ask.price = ba.price.sub(0.01)
-      // }
-      const size = this.fairValue.mul(POS_SIZE).div(4) // TODO increase size
-      this.bid.size = size.sub(size.mul(Math.abs(this.running))).div(this.fairValue)
-      this.ask.size = size.add(size.mul(Math.abs(this.running))).div(this.fairValue)
-      this.bid.price.set_precision(2)
-      this.ask.price.set_precision(2)
-      this.bid.size.set_precision(4)
-      this.ask.size.set_precision(4)
-    }
+  connect () {
+    this.publicClient = new GDAX.PublicClient(PRODUCT)
+    this.authedClient = new GDAX.AuthenticatedClient(API_KEY, SECRET, PASSPHRASE)
+    this.coinBase = new Coinbase({'apiKey': CB_API_KEY, 'apiSecret': CB_SECRET})
   }
 
-  getTrades () {
-    const options = this.trades.length > 0 ? { before: this.trades[0].trade_id } : null
-    this.publicClient.getProductTrades(options, (err, resp, data) => {
-      if (err) {
-        console.error(err)
-      } else {
-        this.trades = data.concat(this.trades)
-        this.updateCandles()
-      }
-    })
-  }
-
-  updateCandles () {
-    this.candles = _.map(this.trades.reduce((candles, trade) => {
-      const time = Date.parse(trade.time)
-      const key = (time - time % (INTERVAL * 1000)).toString()
-      if (candles.hasOwnProperty(key)) {
-        candles[key].push(trade)
-      } else {
-        candles[key] = [trade]
-      }
-      return candles
-    }, {}), (trades, key) => {
-      return trades.reduce((candle, trade) => {
-        candle.high = Math.max(candle.high, trade.price)
-        candle.low = Math.min(candle.low, trade.price)
-        candle.volume += parseFloat(trade.size)
-        return candle
-      }, {
-        time: new Date(parseInt(key)).toISOString(),
-        open: parseFloat(trades[trades.length - 1].price),
-        close: parseFloat(trades[0].price),
-        high: parseFloat(trades[0].price),
-        low: parseFloat(trades[0].price),
-        volume: 0
+  // amount in USD, e.g. 10.0
+  // days between deposits, e.g. 2
+  deposit (amount, days) {
+    return new Promise((resolve, reject) => {
+      this.coinBase.getAccounts({}, (_, accounts) => {
+        const account = accounts.find(acct => acct.currency === 'USD')
+        account.getDeposits(null, (_, deps) => {
+          const dep = deps.find(dep => moment(dep.created_at).isAfter(moment().subtract(days, 'days')))
+          if (!dep) {
+            this.coinBase.getPaymentMethods(null, (_, pms) => {
+              const pm = pms.find(pm => pm.primary_buy)
+              account.deposit({ amount, 'currency': 'USD', 'payment_method': pm.id }, (_, deposit) => {
+                console.log(`Deposit for $${amount} made from ${pm.name}.`)
+              })
+            })
+          } else {
+            console.log(`Recent deposit made ${moment(dep.created_at).fromNow()}.`)
+          }
+        })
+        resolve(account)
       })
     })
+  }
+}
 
-    const lastCandle = this.candles[0]
+const CANDLES_BETWEEN_TRADE = 0
+const MOVEMENT = 0.019
 
-    if (this.interval !== lastCandle.time) {
-      this.interval = lastCandle.time
+class Strategy {
+  constructor (candles) {
+    this.previous = 0
+    this.current = 0
+    this.running = 0
+    this.ticks = 0
+    this.position = ' '
+    this.results = candles.reverse().map((c) => this.update(c)).reverse()
+  }
 
-      const { open, high, low, close } = lastCandle
-      const average = [open, high, low, close].reduce((p, c) => p + c) / 4
-      this.previous = this.current || average
-      this.current = average
-      this.running += this.current - this.previous
-      if (Math.abs(this.running) > (this.current * MOVEMENT)) {
-        console.log('MOVED')
-        if (this.running < 0) {
-          this.outlook = 'short'
-        } else {
-          this.outlook = 'long'
-        }
-        this.running = 0
+  shouldBuy () {
+    return this.results[1] === '-'
+  }
+
+  update (candle) {
+    const average = candle.slice(1, 5).reduce((p, c) => p + c) / 4
+    this.previous = this.current || average
+    this.current = average
+    this.running += this.current - this.previous
+    this.ticks++
+    this.lastPosition = this.position
+    if (this.ticks >= CANDLES_BETWEEN_TRADE && Math.abs(this.running) > (this.current * MOVEMENT)) {
+      if (this.running < 0) {
+        this.position = '-'
+      } else {
+        this.position = '+'
       }
+      this.ticks = 0
+      this.running = 0
     }
-  }
-
-  connect () {
-    this._orderBook = new GDAX.OrderbookSync(PRODUCT)
-    this.authedClient.cancelAllOrders(() => console.log('Cancelled orders.'))
-  }
-
-  get orderBook () {
-    const { _orderBook } = this
-    if (_orderBook) {
-      return _orderBook.book.state()
-    } else {
-      return { asks: [], bids: [] }
-    }
-  }
-
-  get isMarketReady () {
-    return this.orderBook.asks.length > 0 && this.orderBook.bids.length > 0
+    if (this.lastPosition === this.position) { this.position = ' ' }
+    // const n = Math.round((average - 1500) / 400 * 40)
+    // console.log(`${this.position} ${Math.round(average * 100)} ${'*'.repeat(n)}${' '.repeat(40 - n)} (${moment.unix(candle[0])})`)
+    return this.position
   }
 }
 
