@@ -10,6 +10,6 @@ const bot = new Bot()
 bot.run()
 setInterval(() => {
   bot.run()
-}, 60 * 60 * 100)
+}, 60 * 60 * 1000)
 
 export default server
