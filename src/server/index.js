@@ -7,6 +7,7 @@ const server = (app) => {
 }
 
 const bot = new Bot()
+bot.run()
 setInterval(() => {
   bot.run()
 }, 60 * 60 * 100)
