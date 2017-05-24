@@ -8,48 +8,35 @@ const { CB_API_KEY, CB_SECRET } = process.env
 
 const DEPOSIT_AMOUNT = 10    // Dollars
 const DEPOSIT_FREQUENCY = 2  // Days
-const SPEND_RATE = 0.5       // How much of available balance to spend each buy
-
-const PRODUCT = 'BTC-USD'
+const SPEND_RATE = 0.5       // How much of available balance to spend each buy as a float between 0 and 1
+const MIN_BUY = 5
+const PRODUCT = 'ETH-USD'
 
 class Bot {
   run () {
     this.connect()
 
     // Deposit money every so-many days ($10 is the minimum).
-    // Then if there's any balance availble, transfer it to GDAX.
-    this.deposit(DEPOSIT_AMOUNT, DEPOSIT_FREQUENCY).then(({ id, balance }) => {
-      const { amount, currency } = balance
-      if (parseFloat(amount) > 0) {
-        this.authedClient.deposit({ coinbase_account_id: id, amount, currency }, (_, resp, data) => {
-          console.log(`Transfered $${amount} to GDAX.`)
-        })
-      } else {
-        console.log(`No funds avilable to transfer to GDAX.`)
-      }
-    })
-
+    this.deposit(DEPOSIT_AMOUNT, DEPOSIT_FREQUENCY)
     // Get last 200 hourly candles and determine if we should buy.
     const start = moment().subtract(200, 'hours').toISOString()
     const end = moment().toISOString()
     this.publicClient.getProductHistoricRates({ granularity: 60 * 60, start, end }, (_, resp, candles) => {
       const strat = new Strategy(candles)
-      if (strat.shouldBuy()) {
-        this.authedClient.cancelAllOrders(() => {
-          this.authedClient.getAccounts((_, resp, accounts) => {
-            const account = accounts.find(({ currency }) => currency === 'USD')
-            const availble = num(account.available).mul(SPEND_RATE)
-            availble.set_precision(2)
-            if (availble > 0) {
-              this.publicClient.getProductOrderBook({'level': 1}, (_, resp, best) => {
-                const bestBid = num(best.bids[0][0])
-                this.authedClient.buy({
-                  'price': bestBid,
-                  'size': availble.div(bestBid),
-                  'product_id': PRODUCT
-                }, () => console.log(`Placed buy for ${availble.div(bestBid)} BTC @ $${bestBid}.`))
-              })
-            }
+      if (strat.shouldBuy()) this.buy()
+    })
+  }
+
+  buy () {
+    this.coinBase.getAccounts({}, (_, accounts) => {
+      const account = accounts.find(acct => acct.currency === 'USD')
+      const balance = num(account.balance.amount)
+      if (balance.gt(MIN_BUY)) {
+        this.coinBase.getBuyPrice({'currencyPair': PRODUCT}, (_, { data }) => {
+          const amount = balance.mul(SPEND_RATE).div(data.amount).toString()
+          const currency = PRODUCT.split('-')[0]
+          account.buy({ amount, currency }, (_, resp) => {
+            console.log('Bought', amount, currency)
           })
         })
       }
@@ -87,7 +74,7 @@ class Bot {
   }
 }
 
-const CANDLES_BETWEEN_TRADE = 0
+const CANDLES_BETWEEN_TRADE = 1
 const MOVEMENT = 0.019
 
 class Strategy {
@@ -121,8 +108,6 @@ class Strategy {
       this.running = 0
     }
     if (this.lastPosition === this.position) { this.position = ' ' }
-    // const n = Math.round((average - 1500) / 400 * 40)
-    // console.log(`${this.position} ${Math.round(average * 100)} ${'*'.repeat(n)}${' '.repeat(40 - n)} (${moment.unix(candle[0])})`)
     return this.position
   }
 }
