@@ -9,7 +9,7 @@ const { CB_API_KEY, CB_SECRET } = process.env
 const DEPOSIT_AMOUNT = 10    // Dollars
 const DEPOSIT_FREQUENCY = 2  // Days
 const SPEND_RATE = 0.5       // How much of available balance to spend each buy as a float between 0 and 1
-const MIN_BUY = 5
+const MIN_BUY = 1
 const PRODUCT = 'ETH-USD'
 
 class Bot {
@@ -29,13 +29,14 @@ class Bot {
 
   buy () {
     this.coinBase.getAccounts({}, (_, accounts) => {
-      const account = accounts.find(acct => acct.currency === 'USD')
-      const balance = num(account.balance.amount)
+      const currency = PRODUCT.split('-')[0]
+      const usdAccount = accounts.find(acct => acct.currency === 'USD')
+      const cryptoAccount = accounts.find(acct => acct.currency === currency)
+      const balance = num(usdAccount.balance.amount).mul(SPEND_RATE)
       if (balance.gt(MIN_BUY)) {
         this.coinBase.getBuyPrice({'currencyPair': PRODUCT}, (_, { data }) => {
-          const amount = balance.mul(SPEND_RATE).div(data.amount).toString()
-          const currency = PRODUCT.split('-')[0]
-          account.buy({ amount, currency }, (_, resp) => {
+          const amount = balance.div(data.amount).toString()
+          cryptoAccount.buy({ amount, currency }, (_, resp) => {
             console.log('Bought', amount, currency)
           })
         })
